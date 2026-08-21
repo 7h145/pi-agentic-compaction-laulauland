@@ -47,10 +47,12 @@ By default the extension tries these models, in order:
 const COMPACTION_MODELS = [
   { provider: "cerebras", id: "zai-glm-4.7" },
   { provider: "openai", id: "gpt-5.4-mini" },
+  { provider: "openai-codex", id: "gpt-5.4-mini" },
+  { provider: "github-copilot", id: "gpt-5.4-mini" },
 ];
 ```
 
-If none are available, it falls back to the current session model.
+If none are available, it adds the current session model as the final candidate.
 
 You can override that interactively with:
 
@@ -103,7 +105,7 @@ Locations follow normal pi settings precedence:
 
 Project settings override global settings.
 
-At runtime, the extension tries the persisted models in order and skips any that are unavailable, unauthenticated, or no longer registered. If none work, it falls back to the session model.
+At runtime, the extension tries the persisted models in order and skips any that are unavailable, unauthenticated, or no longer registered. The session model is the final candidate when it is not already selected. If a request throws, returns an `error`/`aborted` response, or produces an invalid summary, the extension starts a fresh attempt with the next model. If every candidate fails, it cancels compaction after reporting the failures instead of silently repeating the failed request through Pi's built-in compactor.
 
 ### Steerable compaction
 
@@ -190,6 +192,8 @@ If no persisted model list exists, the extension falls back to the defaults in `
 const COMPACTION_MODELS = [
   { provider: "cerebras", id: "zai-glm-4.7" },
   { provider: "openai", id: "gpt-5.4-mini" },
+  { provider: "openai-codex", id: "gpt-5.4-mini" },
+  { provider: "github-copilot", id: "gpt-5.4-mini" },
 ];
 ```
 
