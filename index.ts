@@ -6,10 +6,11 @@
  * explore it with jq, grep, etc. without writing to disk.
  */
 
-import { complete, type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model } from "@mariozechner/pi-ai";
-import { convertToLlm, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import { convertToLlm, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { Bash } from "just-bash";
 import * as fs from "node:fs";
 import * as path from "node:path";
