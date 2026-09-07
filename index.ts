@@ -8,7 +8,7 @@
 
 import { type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
-import { convertToLlm, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
+import { convertToLlm, estimateTokens, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { Bash } from "just-bash";
@@ -949,6 +949,53 @@ export async function resolveCompactionModels(
 // EXTENSION
 // ============================================================================
 
+export const DEFAULT_LIMITS = {
+    maxTurns: 12,
+    maxTotalTokens: 200_000,
+    timeoutMs: 180_000,
+    maxContextTokens: 48_000,
+    maxOutputTokens: 4_096,
+    maxSummaryChars: 24_000,
+    maxToolCallsPerTurn: 6,
+};
+export type CompactionLimits = typeof DEFAULT_LIMITS;
+
+export function loadCompactionLimits(cwd: string): CompactionLimits {
+    const config = loadCompactionModelConfig(cwd);
+    const limits = { ...DEFAULT_LIMITS };
+    for (const read of [config.globalRead, config.projectRead]) {
+        if (read.error) throw new Error(read.error);
+        const namespace = read.data[CONFIG_NAMESPACE] as JsonObject | undefined;
+        const values = namespace?.limits;
+        if (values === undefined) continue;
+        if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("Compaction limits must be an object");
+        for (const [key, value] of Object.entries(values)) {
+            if (!(key in DEFAULT_LIMITS)) throw new Error(`Unknown compaction limit: ${key}`);
+            if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+                throw new Error(`Compaction limit ${key} must be a positive integer`);
+            }
+            limits[key as keyof CompactionLimits] = value;
+        }
+    }
+    if (limits.timeoutMs > 2_147_483_647) throw new Error("Compaction timeout exceeds timer range");
+    return limits;
+}
+
+// Race the request as well as forwarding the signal: a provider may ignore abort.
+export async function withAbort<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+    signal.throwIfAborted();
+    let onAbort: () => void = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+        onAbort = () => reject(signal.reason ?? new Error("Compaction cancelled"));
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+    try {
+        return await Promise.race([Promise.resolve().then(operation), aborted]);
+    } finally {
+        signal.removeEventListener("abort", onAbort);
+    }
+}
+
 export function getCompactionMessages(preparation: SessionBeforeCompactEvent["preparation"]) {
     return [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
 }
@@ -1035,7 +1082,13 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("session_before_compact", async (event, ctx) => {
-        const { preparation, signal } = event;
+        const { preparation, signal: userSignal } = event;
+        if (userSignal.aborted) return { cancel: true };
+        let limits: CompactionLimits;
+        try { limits = loadCompactionLimits(ctx.cwd); } catch (error) {
+            ctx.ui.notify(String(error), "error");
+            return { cancel: true };
+        }
         const { tokensBefore, firstKeptEntryId, previousSummary } = preparation;
         const sessionId = ctx.sessionManager.getSessionId() || `unknown-${Date.now()}`;
 
@@ -1047,7 +1100,7 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
-        const resolvedModels = await resolveCompactionModels(ctx, signal);
+        const resolvedModels = await resolveCompactionModels(ctx, userSignal);
         if (resolvedModels.candidates.length === 0) {
             ctx.ui.notify("No model available for agentic compaction", "warning");
             return { cancel: true };
@@ -1192,7 +1245,13 @@ What remains to be done`;
               `- ${userCompactionNote}`
             : "Summarize the conversation in /conversation.json. Follow the exploration strategy, then output ONLY the summary.";
 
-        const compactionAttempt = await tryCompactionModelCandidates(
+        const deadline = new AbortController();
+        const signal = AbortSignal.any([userSignal, deadline.signal]);
+        const timer = setTimeout(() => deadline.abort(new Error("Compaction time budget exhausted")), limits.timeoutMs);
+        let totalTokens = 0;
+        let compactionAttempt;
+        try {
+        compactionAttempt = await tryCompactionModelCandidates(
             resolvedModels.candidates,
             signal,
             async (candidate) => {
@@ -1208,18 +1267,26 @@ What remains to be done`;
 
                 ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}`, "info");
 
+                let turns = 0;
                 try {
                     while (true) {
                         if (signal.aborted) {
                             throw new Error("Compaction cancelled");
                         }
 
-                        const response = await completeCompactionTurn(
+                        const estimatedInput = Math.ceil((systemPrompt.length + JSON.stringify(tools).length) / 4) + messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+                        const contextLimit = Math.min(limits.maxContextTokens, model.contextWindow || limits.maxContextTokens);
+                        const outputLimit = Math.min(limits.maxOutputTokens, model.maxTokens || limits.maxOutputTokens);
+                        if (estimatedInput + outputLimit > contextLimit) throw new Error("Compaction context budget exhausted");
+                        if (turns++ >= limits.maxTurns) throw new Error("Compaction turn budget exhausted");
+                        if (totalTokens + estimatedInput + outputLimit > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
+                        const response = await withAbort(signal, () => completeCompactionTurn(
                             ctx,
                             candidate,
                             { systemPrompt, messages, tools },
-                            { signal },
-                        );
+                            { signal, maxTokens: outputLimit },
+                        ));
+                        totalTokens += Math.max(response.usage?.totalTokens || 0, estimatedInput + estimateTokens(response));
                         const responseError = getAssistantResponseError(response);
                         if (responseError) {
                             throw new Error(responseError);
@@ -1227,6 +1294,7 @@ What remains to be done`;
 
                         const toolCalls = response.content.filter((c): c is any => c.type === "toolCall");
 
+                        if (toolCalls.length > limits.maxToolCallsPerTurn) throw new Error("Too many compaction tool calls");
                         if (toolCalls.length > 0) {
                             const assistantMsg: AssistantMessage = {
                                 role: "assistant",
@@ -1247,6 +1315,10 @@ What remains to be done`;
                                 toolCalls,
                                 TOOL_CALL_CONCURRENCY,
                                 async (tc): Promise<ToolCallExecResult> => {
+                                    signal.throwIfAborted();
+                                    if (!["bash", "zsh"].includes(tc.name) || typeof tc.arguments?.command !== "string") {
+                                        return { result: "Invalid shell tool call: expected bash/zsh with a string command", isError: true };
+                                    }
                                     const { command } = tc.arguments as { command: string };
 
                                     ctx.ui.notify(
@@ -1261,14 +1333,15 @@ What remains to be done`;
 
                                     try {
                                         const bash = new Bash({ files: bashFiles });
-                                        const execution = await bash.exec(command);
+                                        const execution = await withAbort(signal, () => bash.exec(command));
+                                        signal.throwIfAborted();
 
                                         result = execution.stdout + (execution.stderr ? `\nstderr: ${execution.stderr}` : "");
                                         if (execution.exitCode !== 0) {
                                             result += `\nexit code: ${execution.exitCode}`;
                                             isError = true;
                                         }
-                                        result = result.slice(0, TOOL_RESULT_MAX_CHARS);
+                                        result = result.length > TOOL_RESULT_MAX_CHARS ? result.slice(0, TOOL_RESULT_MAX_CHARS) + "\n[Output truncated; query a smaller range.]" : result;
                                     } catch (error) {
                                         result = `Error: ${error instanceof Error ? error.message : String(error)}`;
                                         isError = true;
@@ -1347,6 +1420,12 @@ What remains to be done`;
                 );
             },
         );
+
+        } finally {
+            clearTimeout(timer);
+        }
+        if (deadline.signal.aborted && !userSignal.aborted) ctx.ui.notify("Agentic compaction time budget exhausted", "warning");
+        if (signal.aborted) return { cancel: true };
 
         if (compactionAttempt.result) {
             return { compaction: compactionAttempt.result };
