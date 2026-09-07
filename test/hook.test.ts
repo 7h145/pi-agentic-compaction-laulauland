@@ -13,12 +13,12 @@ function response(content: any[], stopReason = "stop", tokens = 10): any {
         usage: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: tokens,
             cost: { input: 0.01, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 } } };
 }
-async function run(complete: (...args: any[]) => Promise<any>, limits: any = {}, preparation: any = {}, signal = new AbortController().signal) {
+async function run(complete: (...args: any[]) => Promise<any>, limits: any = {}, preparation: any = {}, signal = new AbortController().signal, modelIds = ["one"]) {
     const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "compaction-hook-"));
     const notices: string[] = [];
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
-        fs.writeFileSync(path.join(cwd, ".pi/pi-agentic-compaction.json"), JSON.stringify({ models: ["test/one"], limits }));
+        fs.writeFileSync(path.join(cwd, ".pi/pi-agentic-compaction.json"), JSON.stringify({ models: modelIds.map(id => `test/${id}`), limits }));
         let handler: any;
         extension({ registerCommand() {}, on(name: string, fn: any) { if (name === "session_before_compact") handler = fn; } } as any);
         const model = { provider: "test", id: "one", contextWindow: 100_000, maxTokens: 8192 };
@@ -27,7 +27,7 @@ async function run(complete: (...args: any[]) => Promise<any>, limits: any = {},
             branchEntries: [{ type: "message", message: message("DO NOT INCLUDE RETAINED TAIL") }],
             signal,
         }, {
-            cwd, model, modelRegistry: { find: () => model, hasConfiguredAuth: () => true, complete },
+            cwd, model, modelRegistry: { find: (_provider: string, id: string) => ({ ...model, id }), hasConfiguredAuth: () => true, complete },
             sessionManager: { getSessionId: () => "test" }, ui: { notify: (text: string) => notices.push(text) },
         });
         return { result, notices };
@@ -95,6 +95,57 @@ test("invalid limits cancel with an actionable error", async () => {
     const { result, notices } = await run(async () => { assert.fail("must not call"); }, { maxTurns: 0 });
     assert.deepEqual(result, { cancel: true });
     assert.ok(notices.some(n => n.includes("positive integer")));
+});
+
+test("shared budget preflight stops all candidates without provider-failure messages", async () => {
+    const { result, notices } = await run(async () => { assert.fail("No request should start"); },
+        { maxTotalTokens: 10 }, {}, undefined, ["one", "two"]);
+    assert.deepEqual(result, { cancel: true });
+    assert.equal(notices.filter(n => n.includes("Shared compaction token budget exhausted")).length, 1);
+    assert.ok(notices.some(n => n.includes("maxTotalTokens: 10")));
+    assert.ok(notices.every(n => !/trying next model|failed for all configured models|Compaction with .* failed/.test(n)));
+});
+
+test("shared budget exhaustion after a provider response stops failover immediately", async () => {
+    for (const stopReason of ["stop", "error", "toolUse"]) {
+        const calls: string[] = [];
+        const { result, notices } = await run(async model => {
+            calls.push(model.id);
+            return response([{ type: "text", text: summary }], stopReason, 100_000);
+        }, { maxTotalTokens: 20_000 }, {}, undefined, ["one", "two"]);
+        assert.deepEqual(calls, ["one"]);
+        assert.deepEqual(result, { cancel: true });
+        assert.ok(notices.some(n => n.includes("Shared compaction token budget exhausted")));
+        assert.ok(notices.every(n => !/trying next model|failed for all configured models/.test(n)));
+    }
+});
+
+test("genuine provider failover still works until the shared budget is exhausted", async () => {
+    const calls: string[] = [];
+    const { result, notices } = await run(async model => {
+        calls.push(model.id);
+        return model.id === "one"
+            ? response([], "error")
+            : response([{ type: "text", text: summary }], "stop", 100_000);
+    }, { maxTotalTokens: 20_000 }, {}, undefined, ["one", "two", "three"]);
+    assert.deepEqual(calls, ["one", "two"]);
+    assert.deepEqual(result, { cancel: true });
+    assert.equal(notices.filter(n => n.includes("trying next model")).length, 1);
+    assert.equal(notices.filter(n => n.includes("Shared compaction token budget exhausted")).length, 1);
+    assert.ok(notices.every(n => !n.includes("failed for all configured models")));
+});
+
+test("accumulated exploration budget prevents the next turn without switching models", async () => {
+    const calls: string[] = [];
+    const { result, notices } = await run(async model => {
+        calls.push(model.id);
+        return response([{ type: "toolCall", id: "count", name: "bash",
+            arguments: { command: "jq length /conversation.json" } }], "toolUse", 19_000);
+    }, { maxTotalTokens: 20_000 }, {}, undefined, ["one", "two"]);
+    assert.deepEqual(calls, ["one"]);
+    assert.deepEqual(result, { cancel: true });
+    assert.ok(notices.some(n => n.includes("Shared compaction token budget exhausted")));
+    assert.ok(notices.every(n => !/trying next model|failed for all configured models/.test(n)));
 });
 
 test("truncated and structurally incomplete summaries are never installed", async () => {

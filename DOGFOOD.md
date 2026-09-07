@@ -88,7 +88,7 @@ Optional standalone global or project config (project limit keys override global
 {
   "limits": {
     "maxTurns": 12,
-    "maxTotalTokens": 200000,
+    "maxTotalTokens": 5000000,
     "timeoutMs": 180000,
     "maxContextTokens": 48000,
     "maxOutputTokens": 4096,
@@ -99,7 +99,11 @@ Optional standalone global or project config (project limit keys override global
 ```
 
 These are the defaults. `maxTurns` is per candidate. The elapsed-time and total
-token budgets span the whole attempt, including provider failover. Context and
+token budgets span the whole attempt, including provider failover. Shared token
+budget exhaustion stops the whole attempt with a budget-specific warning; it
+does not try another model or report that all providers failed. Explicit global
+or project `maxTotalTokens` settings override the 5-million-token default.
+Context and
 output limits are also capped by the candidate model's declared capacities.
 Token budgets use Pi's estimates and reported usage; they are not exact billing
 limits. An in-flight request may exceed an estimate. Provider-reported usage from
