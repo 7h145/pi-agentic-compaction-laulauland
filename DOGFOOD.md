@@ -5,47 +5,46 @@ Original MIT licensing and authorship are preserved. The compatibility baseline
 is [upstream PR #3](https://github.com/laulauland/pi-agentic-compaction/pull/3),
 including PR #1's loader fix. Issue #2's auth fix was already in upstream main.
 
-## Branches
-
-- `main`: upstream snapshot; unchanged by this work.
-- `7h145/pi-compat-failover`: PR #3's original commits, unchanged.
-- `7h145/compaction-boundaries`: discarded history and split-turn prefix.
-- `7h145/compaction-budgets`: bounded model/tool exploration and timeout.
-- `7h145/summary-validation`: reject truncated, oversized or structurally incomplete summaries.
-- `7h145/continuity-accounting`: evolving goals, file evidence, per-model usage.
-- `7h145/dogfood-packaging`: reproducible dependencies, loader test, fork documentation.
-- `7h145/standalone-config`: extension-owned global/project config, based on the prior integration snapshot.
-- `7h145/integration`: merge commits combining these topics for use.
-
-The initial follow-up topics are stacked: each depends on the preceding topic. The standalone-config topic is based on the completed integration snapshot. For an
-upstream contribution, compare a topic with its predecessor to review only that
-change; rebase onto upstream as prerequisite work is accepted. Do not submit the
-entire integration branch as one PR. No upstream issues or PRs were posted.
-
-## Install from a local checkout
+## Install directly from Git (recommended)
 
 Tested with Pi 0.85.1 and Node 24.19.0. The declared Pi peer range is 0.85.x;
 future Pi releases need another compatibility check.
 
-Clone this fork and select `7h145/integration`, or use the supplied Git bundle
-if GitHub publishing is still blocked. From the checkout:
+Remove any previous installation of this extension first (the original npm/Git
+package or a local checkout); do not load two compaction handlers.
 
 ```sh
-npm ci --ignore-scripts
-npm test
-npm run check
-pi install .
+pi install git:github.com/7h145/pi-agentic-compaction-laulauland@7h145/integration
 ```
 
-Remove the old `npm:pi-agentic-compaction` or original Git package entry first
-if installed; do not load two compaction handlers. Reload Pi with `/reload`.
-The local checkout stays in place: Pi loads the extension from there.
+Pi handles the checkout and dependency installation; no manual clone or
+`npm ci` is needed. In an existing Pi session, run `/reload` afterward.
+
+This installs the code from the integration branch. Extension preferences still
+live in the standalone `pi-agentic-compaction.json` files described below, not
+in Pi's `settings.json` (apart from Pi's normal package registration).
 
 Use `/compaction-model` to choose the registered provider/model(s) you want to
 test. OpenRouter and your LiteLLM/vLLM routes should use the exact IDs shown by Pi.
 The persisted model list is ordered. The current session model is also appended
 as a final candidate if it is not already selected. Check this before testing a
 session that must stay on a particular provider.
+
+### Alternative: install from a local checkout
+
+Use this method when you want to inspect or edit the code and run the tests:
+
+```sh
+git clone -b 7h145/integration https://github.com/7h145/pi-agentic-compaction-laulauland.git
+cd pi-agentic-compaction-laulauland
+npm ci --ignore-scripts
+npm test
+npm run check
+pi install .
+```
+
+Choose one installation method, not both. The local checkout stays in place:
+Pi loads the extension from there. Run `/reload` in an existing Pi session.
 
 ## Standalone configuration and migration
 
@@ -145,8 +144,31 @@ tool modifications or deletions remain evidence-based summary content, not
 automatically inferred filesystem state. Whole-compaction failures have no
 compaction entry to attach usage to; provider-side billing may still occur.
 
+## Branches
+
+- `main`: upstream snapshot; unchanged by this work.
+- `7h145/pi-compat-failover`: PR #3's original commits, unchanged.
+- `7h145/compaction-boundaries`: discarded history and split-turn prefix.
+- `7h145/compaction-budgets`: bounded model/tool exploration and timeout.
+- `7h145/summary-validation`: reject truncated, oversized or structurally incomplete summaries.
+- `7h145/continuity-accounting`: evolving goals, file evidence, per-model usage.
+- `7h145/dogfood-packaging`: reproducible dependencies, loader test, fork documentation.
+- `7h145/standalone-config`: extension-owned global/project config, based on the prior integration snapshot.
+- `7h145/integration`: merge commits combining these topics for use.
+
+The initial follow-up topics are stacked: each depends on the preceding topic. The standalone-config topic is based on the completed integration snapshot. For an
+upstream contribution, compare a topic with its predecessor to review only that
+change; rebase onto upstream as prerequisite work is accepted. Do not submit the
+entire integration branch as one PR. No upstream issues or PRs were posted.
+
 ## Revert
 
-Remove this local package from Pi's packages (or run `pi remove /absolute/path/to/checkout`)
-and `/reload`. Pi's built-in compaction then handles future compactions.
+For the recommended Git installation:
+
+```sh
+pi remove git:github.com/7h145/pi-agentic-compaction-laulauland@7h145/integration
+```
+
+For a local checkout, use `pi remove /absolute/path/to/checkout` instead.
+Then run `/reload`. Pi's built-in compaction handles future compactions.
 Existing summaries remain in the session history.
