@@ -242,7 +242,7 @@ test("the compaction hook retries a terminal model error with a fresh provider",
                     completionModels.push(model.provider);
                     return model.provider === "openai-codex"
                         ? assistantResponse(model, { error: "This operation was aborted" })
-                        : assistantResponse(model, { text: `## Summary\n${"x".repeat(150)}` });
+                        : assistantResponse(model, { text: ("## Summary\n" + ["Main Goal", "Session Type", "Key Decisions", "Files Modified", "Status", "Issues/Blockers", "Next Steps"].map((name, i) => `### ${i + 1}. ${name}\nRelevant session context.\n`).join("\n")) });
                 },
             },
             sessionManager: { getSessionId: () => "session-id" },
@@ -334,7 +334,7 @@ test("legacy completion resolves fresh request auth for every summarizer turn", 
     } as unknown as ExtensionContext;
     const legacyComplete = (async (_model: Model<any>, _context: any, options: any) => {
         seenApiKeys.push(options.apiKey);
-        return assistantResponse(resolvedCandidate.model, { text: `## Summary\n${"x".repeat(150)}` });
+        return assistantResponse(resolvedCandidate.model, { text: ("## Summary\n" + ["Main Goal", "Session Type", "Key Decisions", "Files Modified", "Status", "Issues/Blockers", "Next Steps"].map((name, i) => `### ${i + 1}. ${name}\nRelevant session context.\n`).join("\n")) });
     }) as Parameters<typeof completeCompactionTurn>[4];
 
     await completeCompactionTurn(

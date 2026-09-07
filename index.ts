@@ -130,6 +130,7 @@ export function getDefaultCompactionModelIds(): string[] {
 export function getAssistantResponseError(
     response: Pick<AssistantMessage, "stopReason" | "errorMessage">,
 ): string | undefined {
+    if (response.stopReason === "length") return "Model response was truncated at its output limit";
     if (response.stopReason !== "error" && response.stopReason !== "aborted") {
         return undefined;
     }
@@ -996,6 +997,27 @@ export async function withAbort<T>(signal: AbortSignal, operation: () => Promise
     }
 }
 
+const SUMMARY_SECTIONS = ["Main Goal", "Session Type", "Key Decisions", "Files Modified", "Status", "Issues/Blockers", "Next Steps"];
+
+export function validateSummary(summary: string, stopReason: AssistantMessage["stopReason"], maxChars: number): void {
+    if (stopReason !== "stop") throw new Error(`Incomplete summary: model stopped with ${stopReason}`);
+    if (summary.length < MIN_SUMMARY_CHARS) throw new Error(`Summary too short: ${summary.length} characters`);
+    if (summary.length > maxChars) throw new Error(`Summary exceeds ${maxChars} characters`);
+    // Ignore fenced examples: they cannot supply the actual required sections.
+    const markdown = summary.replace(/^```[^\n]*\n[\s\S]*?^```[ \t]*$/gm, "");
+    const headings = [...markdown.matchAll(/^### ([1-7])\. ([^\n]+)\r?$/gm)];
+    let previousPosition = -1;
+    for (let index = 0; index < SUMMARY_SECTIONS.length; index++) {
+        const matches = headings.filter(match => match[1] === String(index + 1) && match[2].trim() === SUMMARY_SECTIONS[index]);
+        if (matches.length !== 1) throw new Error(`Summary requires section ${index + 1}. ${SUMMARY_SECTIONS[index]}`);
+        const heading = matches[0]!;
+        if (heading.index! <= previousPosition) throw new Error("Summary sections are out of order");
+        previousPosition = heading.index!;
+        const body = markdown.slice(heading.index! + heading[0].length).split(/^#{1,6} /m)[0]!.trim();
+        if (!body) throw new Error(`Empty summary section: ${SUMMARY_SECTIONS[index]}`);
+    }
+}
+
 export function getCompactionMessages(preparation: SessionBeforeCompactEvent["preparation"]) {
     return [...preparation.messagesToSummarize, ...preparation.turnPrefixMessages];
 }
@@ -1212,7 +1234,8 @@ ${deterministicFileOpsContext}${userCompactionNoteContext}
 ${previousContext}
 
 ## Output Format
-Output ONLY the summary in markdown, nothing else.
+Output ONLY the summary in markdown, nothing else. Keep it below ${limits.maxSummaryChars} characters.
+Every required section must contain text; use an explicit "None" when appropriate.
 
 Use the sections below *in order* (they must all be present). You MAY add extra sections/subsections if the "User note passed to /compact" requests it, as long as you keep the required sections present and in order.
 
@@ -1380,9 +1403,8 @@ What remains to be done`;
                             timestamp: Date.now(),
                         } as AssistantMessage);
 
-                        if (summary.length < MIN_SUMMARY_CHARS) {
-                            throw new Error(`Summary too short: ${summary.length} characters`);
-                        }
+                        validateSummary(summary, response.stopReason, limits.maxSummaryChars);
+                        if (totalTokens > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
 
                         if (signal.aborted) {
                             throw new Error("Compaction cancelled");
