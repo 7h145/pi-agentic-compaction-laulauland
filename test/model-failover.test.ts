@@ -255,6 +255,8 @@ test("the compaction hook retries a terminal model error with a fresh provider",
                     tokensBefore: 300_000,
                     firstKeptEntryId: "kept-entry",
                     previousSummary: undefined,
+                    messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Fix compaction" }], timestamp: 0 }],
+                    turnPrefixMessages: [],
                 },
                 branchEntries: [
                     { type: "message", message: { role: "user", content: [{ type: "text", text: "Fix compaction" }] } },
@@ -301,7 +303,7 @@ test("the compaction hook cancels instead of invoking an implicit built-in fallb
 
         const result = await registerCompactionHandler()(
             {
-                preparation: { tokensBefore: 300_000, firstKeptEntryId: "kept-entry", previousSummary: undefined },
+                preparation: { tokensBefore: 300_000, firstKeptEntryId: "kept-entry", previousSummary: undefined, messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "Fix compaction" }], timestamp: 0 }], turnPrefixMessages: [] },
                 branchEntries: [
                     { type: "message", message: { role: "user", content: [{ type: "text", text: "Fix compaction" }] } },
                 ],
