@@ -78,7 +78,7 @@ test("real virtual shell sees only prepared history and returns a summary", asyn
     const { result } = await run(async (_model, context, options) => {
         assert.equal(options.maxTokens, 4096);
         assert.match(context.systemPrompt, /previous decision/);
-        if (calls++ === 0) return response([{ type: "toolCall", id: "read", name: "bash", arguments: { command: "cat /conversation.json" } }], "toolUse");
+        if (calls++ === 0) return response([{ type: "toolCall", id: "read", name: "bash", arguments: { command: "jq -r '.[] | select(.role==\"user\") | .content[]? | select(.type==\"text\") | .text' /conversation.json" } }], "toolUse");
         const output = context.messages.at(-1).content[0].text;
         assert.match(output, /current task/);
         assert.doesNotMatch(output, /DO NOT INCLUDE/);

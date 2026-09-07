@@ -1,37 +1,55 @@
 {
   "name": "pi-agentic-compaction",
-  "version": "0.4.0",
-  "description": "Pi extension for agentic conversation compaction using a virtual filesystem and tool-driven exploration",
+  "version": "0.4.1-7h145.0",
+  "description": "Maintained dogfooding fork of laulauland/pi-agentic-compaction",
   "type": "module",
   "scripts": {
-    "test": "node --experimental-strip-types --test test/*.test.ts"
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "check": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2023 --skipLibCheck --allowImportingTsExtensions index.ts test/*.ts"
   },
   "files": [
     "index.ts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "DOGFOOD.md"
   ],
-  "keywords": ["pi-package", "pi", "compaction", "llm", "agent"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "compaction",
+    "llm",
+    "agent"
+  ],
   "license": "MIT",
   "author": "laulauland",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/laulauland/pi-agentic-compaction.git"
+    "url": "git+https://github.com/7h145/pi-agentic-compaction-laulauland.git"
   },
-  "homepage": "https://github.com/laulauland/pi-agentic-compaction#readme",
+  "homepage": "https://github.com/7h145/pi-agentic-compaction-laulauland",
   "bugs": {
-    "url": "https://github.com/laulauland/pi-agentic-compaction/issues"
+    "url": "https://github.com/7h145/pi-agentic-compaction-laulauland/issues"
   },
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": [
+      "./index.ts"
+    ]
   },
   "dependencies": {
-    "just-bash": "^1.4.1"
+    "just-bash": "1.5.4"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@earendil-works/pi-ai": "^0.85.1",
+    "@earendil-works/pi-coding-agent": "^0.85.1",
+    "@earendil-works/pi-tui": "^0.85.1",
+    "typebox": "^1.3.7"
+  },
+  "private": true,
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "@types/node": "22.19.19"
+  },
+  "engines": {
+    "node": ">=22.19.0"
   }
 }

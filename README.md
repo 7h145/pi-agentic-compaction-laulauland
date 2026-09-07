@@ -1,3 +1,8 @@
+> **7h145 dogfooding fork:** includes upstream PR #3 and focused compaction
+> robustness fixes. See [DOGFOOD.md](DOGFOOD.md) for installation, limits,
+> branch provenance, evaluation and rollback. Upstream documentation follows;
+> its npm installation instructions refer to the original package.
+
 # pi-agentic-compaction
 
 `pi-agentic-compaction` is a [pi](https://github.com/badlogic/pi-mono) package that replaces pi's default compaction pass with a more agentic one.

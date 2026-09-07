@@ -954,7 +954,7 @@ export function loadCompactionLimits(cwd: string): CompactionLimits {
         if (values === undefined) continue;
         if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("Compaction limits must be an object");
         for (const [key, value] of Object.entries(values)) {
-            if (!(key in DEFAULT_LIMITS)) throw new Error(`Unknown compaction limit: ${key}`);
+            if (!Object.hasOwn(DEFAULT_LIMITS, key)) throw new Error(`Unknown compaction limit: ${key}`);
             if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
                 throw new Error(`Compaction limit ${key} must be a positive integer`);
             }
@@ -1148,7 +1148,13 @@ export default function (pi: ExtensionAPI) {
             return { cancel: true };
         }
 
-        const llmMessages = convertToLlm(allMessages);
+        // Pi user messages may use plain strings; expose one consistent JSON
+        // shape so the documented jq queries also see those user instructions.
+        const llmMessages = convertToLlm(allMessages).map(message =>
+            message.role === "user" && typeof message.content === "string"
+                ? { ...message, content: [{ type: "text" as const, text: message.content }] }
+                : message,
+        );
         const bashFiles = { "/conversation.json": JSON.stringify(llmMessages, null, 2) };
 
         const shellToolParams = Type.Object({
@@ -1221,8 +1227,9 @@ ${preparation.isSplitTurn ? "This span ends inside an ongoing turn. Preserve its
 ${deterministicFileOpsContext}${userCompactionNoteContext}
 
 ## Exploration Strategy
+You have at most ${limits.maxTurns} model turns per candidate. Query narrowly and finish the summary before exhausting that budget.
 1. **Count messages**: \`jq 'length' /conversation.json\`
-2. **User requests and changing goals** (ignore slash commands like \`/compact\`): \`jq -r '.[] | select(.role=="user") | .content[]? | select(.type=="text") | .text' /conversation.json | grep -Ev '^/' | head -n 1\`
+2. **User requests and changing goals** (ignore slash commands like \`/compact\`): \`jq -r '.[] | select(.role=="user") | .content[]? | select(.type=="text") | .text' /conversation.json | grep -Ev '^/' | tail -n 40\`
 3. **Last 10-15 messages**: \`jq '.[-15:]' /conversation.json\` - see final state and any issues
 4. **Identify modified files**: Prefer the **File operation evidence** list above. Only add files beyond that list if you can prove there was a successful modification tool result (toolResult.isError != true) for the corresponding tool call.
 5. **Check for user feedback/issues**: \`jq '.[] | select(.role=="user") | .content[0].text' /conversation.json | grep -Ei "doesn't work|still|bug|issue|error|wrong|fix" | tail -10\`
@@ -1297,180 +1304,180 @@ What remains to be done`;
         const usageByModel: Record<string, Usage> = {};
         let compactionAttempt;
         try {
-        compactionAttempt = await tryCompactionModelCandidates(
-            resolvedModels.candidates,
-            signal,
-            async (candidate) => {
-                const { model } = candidate;
-                const messages: Message[] = [
-                    {
-                        role: "user",
-                        content: [{ type: "text", text: initialUserPrompt }],
-                        timestamp: Date.now(),
-                    },
-                ];
-                const trajectory: Message[] = [...messages];
+            compactionAttempt = await tryCompactionModelCandidates(
+                resolvedModels.candidates,
+                signal,
+                async (candidate) => {
+                    const { model } = candidate;
+                    const messages: Message[] = [
+                        {
+                            role: "user",
+                            content: [{ type: "text", text: initialUserPrompt }],
+                            timestamp: Date.now(),
+                        },
+                    ];
+                    const trajectory: Message[] = [...messages];
 
-                ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}`, "info");
+                    ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}`, "info");
 
-                let turns = 0;
-                try {
-                    while (true) {
-                        if (signal.aborted) {
-                            throw new Error("Compaction cancelled");
-                        }
+                    let turns = 0;
+                    try {
+                        while (true) {
+                            if (signal.aborted) {
+                                throw new Error("Compaction cancelled");
+                            }
 
-                        const estimatedInput = Math.ceil((systemPrompt.length + JSON.stringify(tools).length) / 4) + messages.reduce((sum, message) => sum + estimateTokens(message), 0);
-                        const contextLimit = Math.min(limits.maxContextTokens, model.contextWindow || limits.maxContextTokens);
-                        const outputLimit = Math.min(limits.maxOutputTokens, model.maxTokens || limits.maxOutputTokens);
-                        if (estimatedInput + outputLimit > contextLimit) throw new Error("Compaction context budget exhausted");
-                        if (turns++ >= limits.maxTurns) throw new Error("Compaction turn budget exhausted");
-                        if (totalTokens + estimatedInput + outputLimit > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
-                        const response = await withAbort(signal, () => completeCompactionTurn(
-                            ctx,
-                            candidate,
-                            { systemPrompt, messages, tools },
-                            { signal, maxTokens: outputLimit },
-                        ));
-                        if (response.usage) {
-                            addUsage(usage, response.usage);
-                            const modelUsage = usageByModel[fullModelId(model)] ??= emptyUsage();
-                            addUsage(modelUsage, response.usage);
-                        }
-                        totalTokens += Math.max(response.usage?.totalTokens || 0, estimatedInput + estimateTokens(response));
-                        const responseError = getAssistantResponseError(response);
-                        if (responseError) {
-                            throw new Error(responseError);
-                        }
+                            const estimatedInput = Math.ceil((systemPrompt.length + JSON.stringify(tools).length) / 4) + messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+                            const contextLimit = Math.min(limits.maxContextTokens, model.contextWindow || limits.maxContextTokens);
+                            const outputLimit = Math.min(limits.maxOutputTokens, model.maxTokens || limits.maxOutputTokens);
+                            if (estimatedInput + outputLimit > contextLimit) throw new Error("Compaction context budget exhausted");
+                            if (turns++ >= limits.maxTurns) throw new Error("Compaction turn budget exhausted");
+                            if (totalTokens + estimatedInput + outputLimit > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
+                            const response = await withAbort(signal, () => completeCompactionTurn(
+                                ctx,
+                                candidate,
+                                { systemPrompt, messages, tools },
+                                { signal, maxTokens: outputLimit },
+                            ));
+                            if (response.usage) {
+                                addUsage(usage, response.usage);
+                                const modelUsage = usageByModel[fullModelId(model)] ??= emptyUsage();
+                                addUsage(modelUsage, response.usage);
+                            }
+                            totalTokens += Math.max(response.usage?.totalTokens || 0, estimatedInput + estimateTokens(response));
+                            const responseError = getAssistantResponseError(response);
+                            if (responseError) {
+                                throw new Error(responseError);
+                            }
 
-                        const toolCalls = response.content.filter((c): c is any => c.type === "toolCall");
+                            const toolCalls = response.content.filter((c): c is any => c.type === "toolCall");
 
-                        if (toolCalls.length > limits.maxToolCallsPerTurn) throw new Error("Too many compaction tool calls");
-                        if (toolCalls.length > 0) {
-                            const assistantMsg: AssistantMessage = {
-                                role: "assistant",
-                                content: response.content,
-                                api: response.api,
-                                provider: response.provider,
-                                model: response.model,
-                                usage: response.usage,
-                                stopReason: response.stopReason,
-                                timestamp: Date.now(),
-                            };
-                            messages.push(assistantMsg);
-                            trajectory.push(assistantMsg);
-
-                            type ToolCallExecResult = { result: string; isError: boolean };
-
-                            const results = await mapWithConcurrency(
-                                toolCalls,
-                                TOOL_CALL_CONCURRENCY,
-                                async (tc): Promise<ToolCallExecResult> => {
-                                    signal.throwIfAborted();
-                                    if (!["bash", "zsh"].includes(tc.name) || typeof tc.arguments?.command !== "string") {
-                                        return { result: "Invalid shell tool call: expected bash/zsh with a string command", isError: true };
-                                    }
-                                    const { command } = tc.arguments as { command: string };
-
-                                    ctx.ui.notify(
-                                        `${tc.name}: ${command.slice(0, TOOL_CALL_PREVIEW_CHARS)}${
-                                            command.length > TOOL_CALL_PREVIEW_CHARS ? "..." : ""
-                                        }`,
-                                        "info",
-                                    );
-
-                                    let result: string;
-                                    let isError = false;
-
-                                    try {
-                                        const bash = new Bash({ files: bashFiles });
-                                        const execution = await withAbort(signal, () => bash.exec(command));
-                                        signal.throwIfAborted();
-
-                                        result = execution.stdout + (execution.stderr ? `\nstderr: ${execution.stderr}` : "");
-                                        if (execution.exitCode !== 0) {
-                                            result += `\nexit code: ${execution.exitCode}`;
-                                            isError = true;
-                                        }
-                                        result = result.length > TOOL_RESULT_MAX_CHARS ? result.slice(0, TOOL_RESULT_MAX_CHARS) + "\n[Output truncated; query a smaller range.]" : result;
-                                    } catch (error) {
-                                        result = `Error: ${error instanceof Error ? error.message : String(error)}`;
-                                        isError = true;
-                                    }
-
-                                    return { result, isError };
-                                },
-                            );
-
-                            for (let i = 0; i < toolCalls.length; i += 1) {
-                                const toolCall = toolCalls[i]!;
-                                const result = results[i]!;
-                                const toolResultMsg: ToolResultMessage = {
-                                    role: "toolResult",
-                                    toolCallId: toolCall.id,
-                                    toolName: toolCall.name,
-                                    content: [{ type: "text", text: result.result }],
-                                    isError: result.isError,
+                            if (toolCalls.length > limits.maxToolCallsPerTurn) throw new Error("Too many compaction tool calls");
+                            if (toolCalls.length > 0) {
+                                const assistantMsg: AssistantMessage = {
+                                    role: "assistant",
+                                    content: response.content,
+                                    api: response.api,
+                                    provider: response.provider,
+                                    model: response.model,
+                                    usage: response.usage,
+                                    stopReason: response.stopReason,
                                     timestamp: Date.now(),
                                 };
-                                messages.push(toolResultMsg);
-                                trajectory.push(toolResultMsg);
+                                messages.push(assistantMsg);
+                                trajectory.push(assistantMsg);
+
+                                type ToolCallExecResult = { result: string; isError: boolean };
+
+                                const results = await mapWithConcurrency(
+                                    toolCalls,
+                                    TOOL_CALL_CONCURRENCY,
+                                    async (tc): Promise<ToolCallExecResult> => {
+                                        signal.throwIfAborted();
+                                        if (!["bash", "zsh"].includes(tc.name) || typeof tc.arguments?.command !== "string") {
+                                            return { result: "Invalid shell tool call: expected bash/zsh with a string command", isError: true };
+                                        }
+                                        const { command } = tc.arguments as { command: string };
+
+                                        ctx.ui.notify(
+                                            `${tc.name}: ${command.slice(0, TOOL_CALL_PREVIEW_CHARS)}${
+                                                command.length > TOOL_CALL_PREVIEW_CHARS ? "..." : ""
+                                            }`,
+                                            "info",
+                                        );
+
+                                        let result: string;
+                                        let isError = false;
+
+                                        try {
+                                            const bash = new Bash({ files: bashFiles });
+                                            const execution = await withAbort(signal, () => bash.exec(command));
+                                            signal.throwIfAborted();
+
+                                            result = execution.stdout + (execution.stderr ? `\nstderr: ${execution.stderr}` : "");
+                                            if (execution.exitCode !== 0) {
+                                                result += `\nexit code: ${execution.exitCode}`;
+                                                isError = true;
+                                            }
+                                            result = result.length > TOOL_RESULT_MAX_CHARS ? result.slice(0, TOOL_RESULT_MAX_CHARS) + "\n[Output truncated; query a smaller range.]" : result;
+                                        } catch (error) {
+                                            result = `Error: ${error instanceof Error ? error.message : String(error)}`;
+                                            isError = true;
+                                        }
+
+                                        return { result, isError };
+                                    },
+                                );
+
+                                for (let i = 0; i < toolCalls.length; i += 1) {
+                                    const toolCall = toolCalls[i]!;
+                                    const result = results[i]!;
+                                    const toolResultMsg: ToolResultMessage = {
+                                        role: "toolResult",
+                                        toolCallId: toolCall.id,
+                                        toolName: toolCall.name,
+                                        content: [{ type: "text", text: result.result }],
+                                        isError: result.isError,
+                                        timestamp: Date.now(),
+                                    };
+                                    messages.push(toolResultMsg);
+                                    trajectory.push(toolResultMsg);
+                                }
+                                continue;
                             }
-                            continue;
+
+                            const summary = response.content
+                                .filter((content): content is any => content.type === "text")
+                                .map((content) => content.text)
+                                .join("\n")
+                                .trim();
+
+                            trajectory.push({
+                                role: "assistant",
+                                content: response.content,
+                                timestamp: Date.now(),
+                            } as AssistantMessage);
+
+                            validateSummary(summary, response.stopReason, limits.maxSummaryChars);
+                            if (totalTokens > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
+
+                            if (signal.aborted) {
+                                throw new Error("Compaction cancelled");
+                            }
+
+                            saveCompactionDebug(sessionId, {
+                                input: llmMessages,
+                                customInstructions: event.customInstructions,
+                                extractedUserCompactionNote: userCompactionNote,
+                                trajectory,
+                                model: fullModelId(model),
+                                output: { summary, firstKeptEntryId, tokensBefore },
+                            });
+
+                            return { summary, firstKeptEntryId, tokensBefore, usage,
+                                details: { ...fileOps, usageByModel, fileTracking: "verified current results plus inherited summary metadata" } };
                         }
-
-                        const summary = response.content
-                            .filter((content): content is any => content.type === "text")
-                            .map((content) => content.text)
-                            .join("\n")
-                            .trim();
-
-                        trajectory.push({
-                            role: "assistant",
-                            content: response.content,
-                            timestamp: Date.now(),
-                        } as AssistantMessage);
-
-                        validateSummary(summary, response.stopReason, limits.maxSummaryChars);
-                        if (totalTokens > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
-
-                        if (signal.aborted) {
-                            throw new Error("Compaction cancelled");
-                        }
-
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : String(error);
                         saveCompactionDebug(sessionId, {
                             input: llmMessages,
                             customInstructions: event.customInstructions,
                             extractedUserCompactionNote: userCompactionNote,
                             trajectory,
                             model: fullModelId(model),
-                            output: { summary, firstKeptEntryId, tokensBefore },
+                            error: message,
                         });
-
-                        return { summary, firstKeptEntryId, tokensBefore, usage,
-                            details: { ...fileOps, usageByModel, fileTracking: "verified current results plus inherited summary metadata" } };
+                        throw error;
                     }
-                } catch (error) {
-                    const message = error instanceof Error ? error.message : String(error);
-                    saveCompactionDebug(sessionId, {
-                        input: llmMessages,
-                        customInstructions: event.customInstructions,
-                        extractedUserCompactionNote: userCompactionNote,
-                        trajectory,
-                        model: fullModelId(model),
-                        error: message,
-                    });
-                    throw error;
-                }
-            },
-            (failure, hasNext) => {
-                debugLog(`Compaction with ${failure.modelId} failed: ${failure.error}`);
-                ctx.ui.notify(
-                    `Compaction with ${failure.modelId} failed: ${failure.error}${hasNext ? "; trying next model" : ""}`,
-                    "warning",
-                );
-            },
-        );
+                },
+                (failure, hasNext) => {
+                    debugLog(`Compaction with ${failure.modelId} failed: ${failure.error}`);
+                    ctx.ui.notify(
+                        `Compaction with ${failure.modelId} failed: ${failure.error}${hasNext ? "; trying next model" : ""}`,
+                        "warning",
+                    );
+                },
+            );
 
         } finally {
             clearTimeout(timer);
