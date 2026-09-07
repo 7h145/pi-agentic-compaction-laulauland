@@ -201,12 +201,12 @@ function assistantResponse(model: Model<any>, options: { text?: string; error?: 
         provider: model.provider,
         model: model.id,
         usage: {
-            input: 0,
+            input: 10,
             output: 0,
             cacheRead: 0,
             cacheWrite: 0,
-            totalTokens: 0,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            totalTokens: 10,
+            cost: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
         },
         stopReason: options.error ? "error" : "stop",
         errorMessage: options.error,
@@ -269,6 +269,8 @@ test("the compaction hook retries a terminal model error with a fresh provider",
 
         assert.deepEqual(completionModels, ["openai-codex", "github-copilot"]);
         assert.equal(result.compaction.firstKeptEntryId, "kept-entry");
+        assert.equal(result.compaction.usage.totalTokens, 20);
+        assert.equal(result.compaction.details.usageByModel["openai-codex/gpt-5.4-mini"].totalTokens, 10);
         assert.match(result.compaction.summary, /^## Summary/);
         assert.ok(notifications.some((message) => message.includes("trying next model")));
     } finally {

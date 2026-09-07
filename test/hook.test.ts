@@ -86,6 +86,9 @@ test("real virtual shell sees only prepared history and returns a summary", asyn
     }, {}, { previousSummary: "previous decision" });
     assert.equal(result.compaction.summary, summary.trim());
     assert.equal(result.compaction.firstKeptEntryId, "retained");
+    assert.equal(result.compaction.usage.totalTokens, 20);
+    assert.equal(result.compaction.usage.cost.total, 0.02);
+    assert.equal(result.compaction.details.usageByModel["test/one"].totalTokens, 20);
 });
 
 test("invalid limits cancel with an actionable error", async () => {
@@ -104,4 +107,14 @@ test("truncated and structurally incomplete summaries are never installed", asyn
 test("summary size limit rejects oversized final text", async () => {
     const { result } = await run(async () => response([{ type: "text", text: summary }]), { maxSummaryChars: 100 });
     assert.deepEqual(result, { cancel: true });
+});
+
+test("latest user intent is requested without reapplying historical compact notes", async () => {
+    const { result } = await run(async (_model, context) => {
+        assert.match(context.systemPrompt, /latest relevant user instructions/);
+        assert.match(context.systemPrompt, /explicit cancellations or replacements/);
+        assert.doesNotMatch(context.systemPrompt, /## User note passed to \/compact/);
+        return response([{ type: "text", text: summary }]);
+    }, {}, { messagesToSummarize: [message("/compact obsolete formatting request")] });
+    assert.ok(result.compaction);
 });
