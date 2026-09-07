@@ -14,9 +14,10 @@ including PR #1's loader fix. Issue #2's auth fix was already in upstream main.
 - `7h145/summary-validation`: reject truncated, oversized or structurally incomplete summaries.
 - `7h145/continuity-accounting`: evolving goals, file evidence, per-model usage.
 - `7h145/dogfood-packaging`: reproducible dependencies, loader test, fork documentation.
+- `7h145/standalone-config`: extension-owned global/project config, based on the prior integration snapshot.
 - `7h145/integration`: merge commits combining these topics for use.
 
-The follow-up topics are stacked: each depends on the preceding topic. For an
+The initial follow-up topics are stacked: each depends on the preceding topic. The standalone-config topic is based on the completed integration snapshot. For an
 upstream contribution, compare a topic with its predecessor to review only that
 change; rebase onto upstream as prerequisite work is accepted. Do not submit the
 entire integration branch as one PR. No upstream issues or PRs were posted.
@@ -46,22 +47,54 @@ The persisted model list is ordered. The current session model is also appended
 as a final candidate if it is not already selected. Check this before testing a
 session that must stay on a particular provider.
 
-## Limits
+## Standalone configuration and migration
 
-Optional global or project settings (project keys override global keys):
+- Global: `<getAgentDir()>/pi-agentic-compaction.json`.
+  For your Pi configured at `~/.config/pi/agent`, this is
+  `~/.config/pi/agent/pi-agentic-compaction.json`.
+- Project: `<cwd>/.pi/pi-agentic-compaction.json`.
+- A project `models` array replaces the global list, even when empty.
+  An omitted project `models` inherits the global list.
+- Limit keys inherit individually: defaults, then global, then project.
+
+`/compaction-model global` and `/compaction-model project` write the corresponding
+standalone file. Without an argument, an existing project config selects project
+scope; otherwise the picker saves globally. Saving models preserves limits and
+other fields. Pi's `settings.json` still controls package installation and the
+picker's `enabledModels` view, but no longer stores this extension's preferences.
+
+**One-time migration:** copy the contents of the old `"pi-agentic-compaction"`
+object from each Pi settings file into the corresponding standalone file,
+without the outer namespace. Then remove that old object if desired. Old
+settings are not read, merged, or automatically deleted. If a standalone file
+already exists, merge deliberately rather than overwriting it.
+
+For example, the standalone file can contain:
 
 ```json
 {
-  "pi-agentic-compaction": {
-    "limits": {
-      "maxTurns": 12,
-      "maxTotalTokens": 200000,
-      "timeoutMs": 180000,
-      "maxContextTokens": 48000,
-      "maxOutputTokens": 4096,
-      "maxSummaryChars": 24000,
-      "maxToolCallsPerTurn": 6
-    }
+  "models": ["provider/model"],
+  "limits": { "maxTurns": 12 }
+}
+```
+
+Use a real registered provider/model ID, or save via the picker. No configuration
+on your own machine has been migrated remotely.
+
+## Limits
+
+Optional standalone global or project config (project limit keys override global keys):
+
+```json
+{
+  "limits": {
+    "maxTurns": 12,
+    "maxTotalTokens": 200000,
+    "timeoutMs": 180000,
+    "maxContextTokens": 48000,
+    "maxOutputTokens": 4096,
+    "maxSummaryChars": 24000,
+    "maxToolCallsPerTurn": 6
   }
 }
 ```

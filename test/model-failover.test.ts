@@ -107,11 +107,9 @@ test("model resolution skips registered candidates without configured auth", asy
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
         fs.writeFileSync(
-            path.join(cwd, ".pi", "settings.json"),
+            path.join(cwd, ".pi", "pi-agentic-compaction.json"),
             JSON.stringify({
-                "pi-agentic-compaction": {
-                    models: models.map((model) => `${model.provider}/${model.id}`),
-                },
+                models: models.map((model) => `${model.provider}/${model.id}`),
             }),
         );
 
@@ -149,11 +147,9 @@ test("an already-aborted resolution does not inspect configured candidates", asy
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
         fs.writeFileSync(
-            path.join(cwd, ".pi", "settings.json"),
+            path.join(cwd, ".pi", "pi-agentic-compaction.json"),
             JSON.stringify({
-                "pi-agentic-compaction": {
-                    models: models.map((model) => `${model.provider}/${model.id}`),
-                },
+                models: models.map((model) => `${model.provider}/${model.id}`),
             }),
         );
         controller.abort();
@@ -223,11 +219,9 @@ test("the compaction hook retries a terminal model error with a fresh provider",
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
         fs.writeFileSync(
-            path.join(cwd, ".pi", "settings.json"),
+            path.join(cwd, ".pi", "pi-agentic-compaction.json"),
             JSON.stringify({
-                "pi-agentic-compaction": {
-                    models: models.map((model) => `${model.provider}/${model.id}`),
-                },
+                models: models.map((model) => `${model.provider}/${model.id}`),
             }),
         );
 
@@ -286,8 +280,8 @@ test("the compaction hook cancels instead of invoking an implicit built-in fallb
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
         fs.writeFileSync(
-            path.join(cwd, ".pi", "settings.json"),
-            JSON.stringify({ "pi-agentic-compaction": { models: [`${model.provider}/${model.id}`] } }),
+            path.join(cwd, ".pi", "pi-agentic-compaction.json"),
+            JSON.stringify({ models: [`${model.provider}/${model.id}`] }),
         );
 
         const ctx = {

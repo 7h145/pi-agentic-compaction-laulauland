@@ -29,7 +29,7 @@ const COMPACTION_MODELS = [
     { provider: "github-copilot", id: "gpt-5.4-mini" },
 ];
 
-const CONFIG_NAMESPACE = "pi-agentic-compaction";
+const CONFIG_FILENAME = "pi-agentic-compaction.json";
 const PROJECT_CONFIG_DIR = ".pi";
 const THINKING_LEVEL_SUFFIXES = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
 
@@ -353,10 +353,10 @@ function sortModelsForPicker(models: Model<any>[]): Model<any>[] {
     });
 }
 
-function getSettingsPaths(cwd: string): { global: string; project: string } {
+export function getSettingsPaths(cwd: string): { global: string; project: string } {
     return {
-        global: path.join(getAgentDir(), "settings.json"),
-        project: path.join(cwd, PROJECT_CONFIG_DIR, "settings.json"),
+        global: path.join(getAgentDir(), CONFIG_FILENAME),
+        project: path.join(cwd, PROJECT_CONFIG_DIR, CONFIG_FILENAME),
     };
 }
 
@@ -376,7 +376,7 @@ function readJsonObjectFile(filePath: string): ReadJsonResult {
             return {
                 exists: true,
                 data: {},
-                error: `Settings file must contain a top-level JSON object: ${filePath}`,
+                error: `Configuration file must contain a top-level JSON object: ${filePath}`,
             };
         }
 
@@ -388,12 +388,7 @@ function readJsonObjectFile(filePath: string): ReadJsonResult {
 }
 
 function extractPersistedCompactionConfig(data: JsonObject): PersistedCompactionConfig {
-    const raw = data[CONFIG_NAMESPACE];
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-        return {};
-    }
-
-    const object = raw as JsonObject;
+    const object = data;
     const models = Array.isArray(object.models)
         ? normalizeModelIds(object.models.filter((value): value is string => typeof value === "string"))
         : undefined;
@@ -401,7 +396,7 @@ function extractPersistedCompactionConfig(data: JsonObject): PersistedCompaction
     return { models };
 }
 
-function loadCompactionModelConfig(cwd: string): LoadedCompactionConfig {
+export function loadCompactionModelConfig(cwd: string): LoadedCompactionConfig {
     const paths = getSettingsPaths(cwd);
     const globalRead = readJsonObjectFile(paths.global);
     const projectRead = readJsonObjectFile(paths.project);
@@ -449,7 +444,7 @@ function writeJsonObjectFileAtomic(filePath: string, data: JsonObject): void {
     fs.renameSync(tempPath, filePath);
 }
 
-function persistCompactionModelConfig(cwd: string, scope: ConfigScope, models: string[]): string {
+export function persistCompactionModelConfig(cwd: string, scope: ConfigScope, models: string[]): string {
     const paths = getSettingsPaths(cwd);
     const filePath = scope === "global" ? paths.global : paths.project;
     const current = readJsonObjectFile(filePath);
@@ -459,14 +454,7 @@ function persistCompactionModelConfig(cwd: string, scope: ConfigScope, models: s
     }
 
     const root: JsonObject = { ...current.data };
-    const existingNamespace = root[CONFIG_NAMESPACE];
-    const nextNamespace: JsonObject =
-        existingNamespace && typeof existingNamespace === "object" && !Array.isArray(existingNamespace)
-            ? { ...(existingNamespace as JsonObject) }
-            : {};
-
-    nextNamespace.models = normalizeModelIds(models);
-    root[CONFIG_NAMESPACE] = nextNamespace;
+    root.models = normalizeModelIds(models);
 
     writeJsonObjectFileAtomic(filePath, root);
     return filePath;
@@ -949,8 +937,7 @@ export function loadCompactionLimits(cwd: string): CompactionLimits {
     const limits = { ...DEFAULT_LIMITS };
     for (const read of [config.globalRead, config.projectRead]) {
         if (read.error) throw new Error(read.error);
-        const namespace = read.data[CONFIG_NAMESPACE] as JsonObject | undefined;
-        const values = namespace?.limits;
+        const values = read.data.limits;
         if (values === undefined) continue;
         if (!values || typeof values !== "object" || Array.isArray(values)) throw new Error("Compaction limits must be an object");
         for (const [key, value] of Object.entries(values)) {

@@ -70,7 +70,7 @@ That command opens a picker where you can:
 - choose multiple compaction models
 - reorder them into fallback order
 - switch between `scoped` models (from pi's `enabledModels`) and `all` available models
-- persist the selection to pi settings
+- persist the selection to the extension's standalone config
 
 Picker controls:
 
@@ -90,25 +90,23 @@ You can also choose the save target explicitly:
 /compaction-model project
 ```
 
-The effective config is stored under a namespaced block in pi settings:
+The extension owns a standalone `pi-agentic-compaction.json` file with top-level fields:
 
 ```json
 {
-  "pi-agentic-compaction": {
-    "models": [
-      "cerebras/zai-glm-4.7",
-      "openai/gpt-5.4-mini"
-    ]
-  }
+  "models": [
+    "cerebras/zai-glm-4.7",
+    "openai/gpt-5.4-mini"
+  ]
 }
 ```
 
-Locations follow normal pi settings precedence:
+Configuration locations:
 
-- global: `~/.pi/agent/settings.json`
-- project: `.pi/settings.json`
+- global: `<getAgentDir()>/pi-agentic-compaction.json` (follows Pi's configured agent directory)
+- project: `<cwd>/.pi/pi-agentic-compaction.json`
 
-Project settings override global settings.
+Project `models` replace the global list; project `limits` override global limits per key.
 
 At runtime, the extension tries the persisted models in order and skips any that are unavailable, unauthenticated, or no longer registered. The session model is the final candidate when it is not already selected. If a request throws, returns an `error`/`aborted` response, or produces an invalid summary, the extension starts a fresh attempt with the next model. If every candidate fails, it cancels compaction after reporting the failures instead of silently repeating the failed request through Pi's built-in compactor.
 
@@ -179,13 +177,14 @@ There are two layers of configuration:
 
 ### 1. Interactive model selection (recommended)
 
-Use `/compaction-model` and persist the selected ordered fallback list into pi settings under:
+Use `/compaction-model` to save the ordered fallback list into the standalone config:
 
 ```json
 {
-  "pi-agentic-compaction": {
-    "models": ["cerebras/zai-glm-4.7", "openai/gpt-5.4-mini"]
-  }
+  "models": [
+    "cerebras/zai-glm-4.7",
+    "openai/gpt-5.4-mini"
+  ]
 }
 ```
 
@@ -202,7 +201,7 @@ const COMPACTION_MODELS = [
 ];
 ```
 
-When writing settings, the extension updates only the `pi-agentic-compaction.models` field and preserves the rest of the settings file.
+When saving, the extension updates only `models` and preserves `limits` and other fields in that standalone file. Pi's `settings.json` is never written by this extension. The picker still reads Pi's `enabledModels` setting for its scoped-model view.
 
 Other implementation-level constants still live in `index.ts`, for example:
 
