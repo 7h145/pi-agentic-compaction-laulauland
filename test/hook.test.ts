@@ -93,3 +93,15 @@ test("invalid limits cancel with an actionable error", async () => {
     assert.deepEqual(result, { cancel: true });
     assert.ok(notices.some(n => n.includes("positive integer")));
 });
+
+test("truncated and structurally incomplete summaries are never installed", async () => {
+    for (const [text, stop] of [[summary, "length"], ["x".repeat(300), "stop"], [summary.replace("### 6. Issues/Blockers", "### Missing"), "stop"]]) {
+        const { result } = await run(async () => response([{ type: "text", text }], stop));
+        assert.deepEqual(result, { cancel: true });
+    }
+});
+
+test("summary size limit rejects oversized final text", async () => {
+    const { result } = await run(async () => response([{ type: "text", text: summary }]), { maxSummaryChars: 100 });
+    assert.deepEqual(result, { cancel: true });
+});
