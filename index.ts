@@ -100,7 +100,16 @@ export type CompactionAttemptResult<TResult> = {
     result?: TResult;
     failures: CompactionAttemptFailure[];
     aborted: boolean;
+    sharedBudgetError?: string;
 };
+
+// This budget belongs to the entire compaction, not to any one provider.
+export class SharedTokenBudgetError extends Error {
+    constructor(used: number, limit: number, nextRequestReserve = 0) {
+        super(`Shared compaction token budget exhausted (used/estimated: ${used}; next request reserve: ${nextRequestReserve}; maxTotalTokens: ${limit}). Increase limits.maxTotalTokens to retry. Model failover stopped because the budget is shared.`);
+        this.name = "SharedTokenBudgetError";
+    }
+}
 
 // ============================================================================
 // UTILITIES
@@ -158,6 +167,9 @@ export async function tryCompactionModelCandidates<TResult>(
         } catch (error) {
             if (signal.aborted) {
                 return { failures, aborted: true };
+            }
+            if (error instanceof SharedTokenBudgetError) {
+                return { failures, aborted: false, sharedBudgetError: error.message };
             }
 
             const failure = {
@@ -923,7 +935,7 @@ export async function resolveCompactionModels(
 
 export const DEFAULT_LIMITS = {
     maxTurns: 12,
-    maxTotalTokens: 200_000,
+    maxTotalTokens: 5_000_000,
     timeoutMs: 180_000,
     maxContextTokens: 48_000,
     maxOutputTokens: 4_096,
@@ -1319,7 +1331,9 @@ What remains to be done`;
                             const outputLimit = Math.min(limits.maxOutputTokens, model.maxTokens || limits.maxOutputTokens);
                             if (estimatedInput + outputLimit > contextLimit) throw new Error("Compaction context budget exhausted");
                             if (turns++ >= limits.maxTurns) throw new Error("Compaction turn budget exhausted");
-                            if (totalTokens + estimatedInput + outputLimit > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
+                            if (totalTokens + estimatedInput + outputLimit > limits.maxTotalTokens) {
+                                throw new SharedTokenBudgetError(totalTokens, limits.maxTotalTokens, estimatedInput + outputLimit);
+                            }
                             const response = await withAbort(signal, () => completeCompactionTurn(
                                 ctx,
                                 candidate,
@@ -1332,6 +1346,11 @@ What remains to be done`;
                                 addUsage(modelUsage, response.usage);
                             }
                             totalTokens += Math.max(response.usage?.totalTokens || 0, estimatedInput + estimateTokens(response));
+                            // Check before handling provider errors or tool calls: neither
+                            // a different provider nor another tool turn renews this budget.
+                            if (totalTokens > limits.maxTotalTokens) {
+                                throw new SharedTokenBudgetError(totalTokens, limits.maxTotalTokens);
+                            }
                             const responseError = getAssistantResponseError(response);
                             if (responseError) {
                                 throw new Error(responseError);
@@ -1426,7 +1445,6 @@ What remains to be done`;
                             } as AssistantMessage);
 
                             validateSummary(summary, response.stopReason, limits.maxSummaryChars);
-                            if (totalTokens > limits.maxTotalTokens) throw new Error("Compaction total token budget exhausted");
 
                             if (signal.aborted) {
                                 throw new Error("Compaction cancelled");
@@ -1471,6 +1489,11 @@ What remains to be done`;
         }
         if (deadline.signal.aborted && !userSignal.aborted) ctx.ui.notify("Agentic compaction time budget exhausted", "warning");
         if (signal.aborted) return { cancel: true };
+
+        if (compactionAttempt.sharedBudgetError) {
+            ctx.ui.notify(compactionAttempt.sharedBudgetError, "warning");
+            return { cancel: true };
+        }
 
         if (compactionAttempt.result) {
             return { compaction: compactionAttempt.result };
