@@ -1,6 +1,6 @@
 {
   "name": "pi-agentic-compaction",
-  "version": "0.4.1-7h145.0",
+  "version": "0.4.1-7h145.1",
   "description": "Maintained dogfooding fork of laulauland/pi-agentic-compaction",
   "type": "module",
   "scripts": {

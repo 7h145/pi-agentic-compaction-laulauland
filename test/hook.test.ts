@@ -18,7 +18,7 @@ async function run(complete: (...args: any[]) => Promise<any>, limits: any = {},
     const notices: string[] = [];
     try {
         fs.mkdirSync(path.join(cwd, ".pi"));
-        fs.writeFileSync(path.join(cwd, ".pi/settings.json"), JSON.stringify({ "pi-agentic-compaction": { models: ["test/one"], limits } }));
+        fs.writeFileSync(path.join(cwd, ".pi/pi-agentic-compaction.json"), JSON.stringify({ models: ["test/one"], limits }));
         let handler: any;
         extension({ registerCommand() {}, on(name: string, fn: any) { if (name === "session_before_compact") handler = fn; } } as any);
         const model = { provider: "test", id: "one", contextWindow: 100_000, maxTokens: 8192 };
