@@ -6,10 +6,11 @@
  * explore it with jq, grep, etc. without writing to disk.
  */
 
-import { complete, type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model } from "@mariozechner/pi-ai";
-import { convertToLlm, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@mariozechner/pi-tui";
-import { Type } from "@sinclair/typebox";
+import { type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import { convertToLlm, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import { Bash } from "just-bash";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -24,6 +25,8 @@ import { homedir } from "node:os";
 const COMPACTION_MODELS = [
     { provider: "cerebras", id: "zai-glm-4.7" },
     { provider: "openai", id: "gpt-5.4-mini" },
+    { provider: "openai-codex", id: "gpt-5.4-mini" },
+    { provider: "github-copilot", id: "gpt-5.4-mini" },
 ];
 
 const CONFIG_NAMESPACE = "pi-agentic-compaction";
@@ -44,7 +47,6 @@ const MIN_SUMMARY_CHARS = 100;
 // ============================================================================
 
 type JsonObject = Record<string, unknown>;
-type RequestAuth = { apiKey?: string; headers?: Record<string, string> };
 type ConfigScope = "global" | "project";
 type ConfigSource = "default" | ConfigScope;
 type PickerScope = "all" | "scoped";
@@ -85,6 +87,21 @@ type PickerItem = {
     selected: boolean;
 };
 
+export type ResolvedCompactionModel = {
+    model: Model<any>;
+};
+
+export type CompactionAttemptFailure = {
+    modelId: string;
+    error: string;
+};
+
+export type CompactionAttemptResult<TResult> = {
+    result?: TResult;
+    failures: CompactionAttemptFailure[];
+    aborted: boolean;
+};
+
 // ============================================================================
 // UTILITIES
 // ============================================================================
@@ -106,8 +123,52 @@ function fullModelId(model: Pick<Model<any>, "provider" | "id">): string {
     return `${model.provider}/${model.id}`;
 }
 
-function getDefaultCompactionModelIds(): string[] {
+export function getDefaultCompactionModelIds(): string[] {
     return COMPACTION_MODELS.map((model) => `${model.provider}/${model.id}`);
+}
+
+export function getAssistantResponseError(
+    response: Pick<AssistantMessage, "stopReason" | "errorMessage">,
+): string | undefined {
+    if (response.stopReason !== "error" && response.stopReason !== "aborted") {
+        return undefined;
+    }
+
+    return response.errorMessage?.trim() || `Model stopped with ${response.stopReason}`;
+}
+
+export async function tryCompactionModelCandidates<TResult>(
+    candidates: ResolvedCompactionModel[],
+    signal: AbortSignal,
+    attempt: (candidate: ResolvedCompactionModel) => Promise<TResult>,
+    onFailure?: (failure: CompactionAttemptFailure, hasNext: boolean) => void,
+): Promise<CompactionAttemptResult<TResult>> {
+    const failures: CompactionAttemptFailure[] = [];
+
+    for (let index = 0; index < candidates.length; index += 1) {
+        if (signal.aborted) {
+            return { failures, aborted: true };
+        }
+
+        const candidate = candidates[index]!;
+        try {
+            const result = await attempt(candidate);
+            return { result, failures, aborted: false };
+        } catch (error) {
+            if (signal.aborted) {
+                return { failures, aborted: true };
+            }
+
+            const failure = {
+                modelId: fullModelId(candidate.model),
+                error: error instanceof Error ? error.message : String(error),
+            };
+            failures.push(failure);
+            onFailure?.(failure, index + 1 < candidates.length);
+        }
+    }
+
+    return { failures, aborted: false };
 }
 
 function parseFullModelId(value: string): { provider: string; id: string } | null {
@@ -486,6 +547,8 @@ class CompactionModelSelectorComponent extends Container implements Focusable {
     private readonly summaryText: Text;
     private readonly listContainer: Container;
     private readonly footerText: Text;
+    private readonly tui: TUI;
+    private readonly theme: any;
 
     private selectedIds: string[];
     private scope: PickerScope;
@@ -496,8 +559,8 @@ class CompactionModelSelectorComponent extends Container implements Focusable {
     private _focused = false;
 
     constructor(
-        private readonly tui: TUI,
-        private readonly theme: any,
+        tui: TUI,
+        theme: any,
         options: {
             allModels: Model<any>[];
             scopedModels: Model<any>[];
@@ -508,6 +571,8 @@ class CompactionModelSelectorComponent extends Container implements Focusable {
         },
     ) {
         super();
+        this.tui = tui;
+        this.theme = theme;
 
         for (const model of options.allModels) {
             this.modelsById.set(fullModelId(model), model);
@@ -778,16 +843,77 @@ function saveCompactionDebug(sessionId: string, data: any): void {
 // MODEL RESOLUTION
 // ============================================================================
 
-async function resolveCompactionModel(ctx: ExtensionContext): Promise<
-    { model: Model<any>; requestAuth: RequestAuth; configuredIds: string[]; configSource: ConfigSource } | undefined
-> {
+export type CompactionModelResolution = {
+    candidates: ResolvedCompactionModel[];
+    configuredIds: string[];
+    configSource: ConfigSource;
+};
+
+type CompletionContext = Parameters<typeof complete>[1];
+type CompletionOptions = NonNullable<Parameters<typeof complete>[2]>;
+type ModelRegistryWithComplete = {
+    complete?: (
+        model: Model<any>,
+        context: CompletionContext,
+        options?: CompletionOptions,
+    ) => Promise<AssistantMessage>;
+};
+
+export async function completeCompactionTurn(
+    ctx: ExtensionContext,
+    candidate: ResolvedCompactionModel,
+    context: CompletionContext,
+    options: CompletionOptions,
+    legacyComplete: typeof complete = complete,
+): Promise<AssistantMessage> {
+    const registryComplete = (ctx.modelRegistry as unknown as ModelRegistryWithComplete).complete;
+    if (typeof registryComplete === "function") {
+        return registryComplete.call(ctx.modelRegistry, candidate.model, context, options);
+    }
+
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate.model);
+    if (options.signal?.aborted) {
+        throw new Error("Compaction cancelled");
+    }
+    if (!auth.ok) {
+        throw new Error(`Could not resolve request auth for ${fullModelId(candidate.model)}: ${auth.error}`);
+    }
+
+    return legacyComplete(candidate.model, context, {
+        ...options,
+        apiKey: auth.apiKey,
+        headers: auth.headers,
+    });
+}
+
+export async function resolveCompactionModels(
+    ctx: ExtensionContext,
+    signal: AbortSignal,
+): Promise<CompactionModelResolution> {
     const config = loadCompactionModelConfig(ctx.cwd);
     const configuredIds = config.models;
+    const candidates: ResolvedCompactionModel[] = [];
+    const seen = new Set<string>();
 
     debugLog(`Compaction model config source: ${config.source}`);
     debugLog(`Compaction model candidates: ${configuredIds.join(", ") || "(none)"}`);
 
+    const addCandidate = (model: Model<any>, configuredId: string): void => {
+        if (signal.aborted) return;
+
+        const modelId = fullModelId(model);
+        if (seen.has(modelId)) return;
+        if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
+            debugLog(`No configured auth for ${configuredId}`);
+            return;
+        }
+
+        seen.add(modelId);
+        candidates.push({ model });
+    };
+
     for (const candidateId of configuredIds) {
+        if (signal.aborted) break;
         const parsed = parseFullModelId(candidateId);
         if (!parsed) {
             debugLog(`Skipping invalid compaction model id: ${candidateId}`);
@@ -800,36 +926,23 @@ async function resolveCompactionModel(ctx: ExtensionContext): Promise<
             continue;
         }
 
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(registryModel);
-        if (!auth.ok) {
-            debugLog(`No request auth for ${candidateId}: ${auth.error}`);
-            continue;
-        }
-
-        return {
-            model: registryModel,
-            requestAuth: { apiKey: auth.apiKey, headers: auth.headers },
-            configuredIds,
-            configSource: config.source,
-        };
+        addCandidate(registryModel, candidateId);
     }
 
-    if (ctx.model) {
-        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-        if (auth.ok) {
-            debugLog(`Falling back to session model ${ctx.model.provider}/${ctx.model.id}`);
-            return {
-                model: ctx.model,
-                requestAuth: { apiKey: auth.apiKey, headers: auth.headers },
-                configuredIds,
-                configSource: config.source,
-            };
+    if (!signal.aborted && ctx.model) {
+        const sessionModelId = fullModelId(ctx.model);
+        const before = candidates.length;
+        addCandidate(ctx.model, sessionModelId);
+        if (candidates.length > before) {
+            debugLog(`Added session model fallback ${sessionModelId}`);
         }
-
-        debugLog(`No request auth for session model ${ctx.model.provider}/${ctx.model.id}: ${auth.error}`);
     }
 
-    return undefined;
+    return {
+        candidates,
+        configuredIds,
+        configSource: config.source,
+    };
 }
 
 // ============================================================================
@@ -930,17 +1043,14 @@ export default function (pi: ExtensionAPI) {
             return;
         }
 
-        const selectedModel = await resolveCompactionModel(ctx);
-        if (!selectedModel) {
-            ctx.ui.notify("No model available for compaction", "warning");
-            return;
+        const resolvedModels = await resolveCompactionModels(ctx, signal);
+        if (resolvedModels.candidates.length === 0) {
+            ctx.ui.notify("No model available for agentic compaction", "warning");
+            return { cancel: true };
         }
 
-        const { model, requestAuth } = selectedModel;
         const llmMessages = convertToLlm(allMessages);
         const bashFiles = { "/conversation.json": JSON.stringify(llmMessages, null, 2) };
-
-        ctx.ui.notify(`Compacting ${allMessages.length} messages with ${model.provider}/${model.id}`, "info");
 
         const shellToolParams = Type.Object({
             command: Type.String({ description: "The shell command to execute" }),
@@ -1072,145 +1182,175 @@ What remains to be done`;
               `- ${userCompactionNote}`
             : "Summarize the conversation in /conversation.json. Follow the exploration strategy, then output ONLY the summary.";
 
-        const messages: Message[] = [
-            {
-                role: "user",
-                content: [{ type: "text", text: initialUserPrompt }],
-                timestamp: Date.now(),
-            },
-        ];
-
-        const trajectory: Message[] = [...messages];
-
-        try {
-            while (true) {
-                if (signal.aborted) return;
-
-                const response = await complete(model, { systemPrompt, messages, tools }, {
-                    apiKey: requestAuth.apiKey,
-                    headers: requestAuth.headers,
-                    signal,
-                });
-
-                const toolCalls = response.content.filter((c): c is any => c.type === "toolCall");
-
-                if (toolCalls.length > 0) {
-                    const assistantMsg: AssistantMessage = {
-                        role: "assistant",
-                        content: response.content,
-                        api: response.api,
-                        provider: response.provider,
-                        model: response.model,
-                        usage: response.usage,
-                        stopReason: response.stopReason,
+        const compactionAttempt = await tryCompactionModelCandidates(
+            resolvedModels.candidates,
+            signal,
+            async (candidate) => {
+                const { model } = candidate;
+                const messages: Message[] = [
+                    {
+                        role: "user",
+                        content: [{ type: "text", text: initialUserPrompt }],
                         timestamp: Date.now(),
-                    };
-                    messages.push(assistantMsg);
-                    trajectory.push(assistantMsg);
+                    },
+                ];
+                const trajectory: Message[] = [...messages];
 
-                    type ToolCallExecResult = { result: string; isError: boolean };
+                ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}`, "info");
 
-                    const results = await mapWithConcurrency(toolCalls, TOOL_CALL_CONCURRENCY, async (tc): Promise<ToolCallExecResult> => {
-                        const { command } = tc.arguments as { command: string };
-
-                        ctx.ui.notify(
-                            `${tc.name}: ${command.slice(0, TOOL_CALL_PREVIEW_CHARS)}${command.length > TOOL_CALL_PREVIEW_CHARS ? "..." : ""}`,
-                            "info",
-                        );
-
-                        let result: string;
-                        let isError = false;
-
-                        try {
-                            // Each tool call gets its own Bash instance for concurrent execution
-                            const bash = new Bash({ files: bashFiles });
-                            const r = await bash.exec(command);
-
-                            result = r.stdout + (r.stderr ? `\nstderr: ${r.stderr}` : "");
-                            if (r.exitCode !== 0) {
-                                result += `\nexit code: ${r.exitCode}`;
-                                isError = true;
-                            }
-                            result = result.slice(0, TOOL_RESULT_MAX_CHARS);
-                        } catch (e: any) {
-                            result = `Error: ${e.message}`;
-                            isError = true;
+                try {
+                    while (true) {
+                        if (signal.aborted) {
+                            throw new Error("Compaction cancelled");
                         }
 
-                        return { result, isError };
-                    });
+                        const response = await completeCompactionTurn(
+                            ctx,
+                            candidate,
+                            { systemPrompt, messages, tools },
+                            { signal },
+                        );
+                        const responseError = getAssistantResponseError(response);
+                        if (responseError) {
+                            throw new Error(responseError);
+                        }
 
-                    for (let i = 0; i < toolCalls.length; i += 1) {
-                        const tc = toolCalls[i]!;
-                        const r = results[i]!;
+                        const toolCalls = response.content.filter((c): c is any => c.type === "toolCall");
 
-                        const toolResultMsg: ToolResultMessage = {
-                            role: "toolResult",
-                            toolCallId: tc.id,
-                            toolName: tc.name,
-                            content: [{ type: "text", text: r.result }],
-                            isError: r.isError,
+                        if (toolCalls.length > 0) {
+                            const assistantMsg: AssistantMessage = {
+                                role: "assistant",
+                                content: response.content,
+                                api: response.api,
+                                provider: response.provider,
+                                model: response.model,
+                                usage: response.usage,
+                                stopReason: response.stopReason,
+                                timestamp: Date.now(),
+                            };
+                            messages.push(assistantMsg);
+                            trajectory.push(assistantMsg);
+
+                            type ToolCallExecResult = { result: string; isError: boolean };
+
+                            const results = await mapWithConcurrency(
+                                toolCalls,
+                                TOOL_CALL_CONCURRENCY,
+                                async (tc): Promise<ToolCallExecResult> => {
+                                    const { command } = tc.arguments as { command: string };
+
+                                    ctx.ui.notify(
+                                        `${tc.name}: ${command.slice(0, TOOL_CALL_PREVIEW_CHARS)}${
+                                            command.length > TOOL_CALL_PREVIEW_CHARS ? "..." : ""
+                                        }`,
+                                        "info",
+                                    );
+
+                                    let result: string;
+                                    let isError = false;
+
+                                    try {
+                                        const bash = new Bash({ files: bashFiles });
+                                        const execution = await bash.exec(command);
+
+                                        result = execution.stdout + (execution.stderr ? `\nstderr: ${execution.stderr}` : "");
+                                        if (execution.exitCode !== 0) {
+                                            result += `\nexit code: ${execution.exitCode}`;
+                                            isError = true;
+                                        }
+                                        result = result.slice(0, TOOL_RESULT_MAX_CHARS);
+                                    } catch (error) {
+                                        result = `Error: ${error instanceof Error ? error.message : String(error)}`;
+                                        isError = true;
+                                    }
+
+                                    return { result, isError };
+                                },
+                            );
+
+                            for (let i = 0; i < toolCalls.length; i += 1) {
+                                const toolCall = toolCalls[i]!;
+                                const result = results[i]!;
+                                const toolResultMsg: ToolResultMessage = {
+                                    role: "toolResult",
+                                    toolCallId: toolCall.id,
+                                    toolName: toolCall.name,
+                                    content: [{ type: "text", text: result.result }],
+                                    isError: result.isError,
+                                    timestamp: Date.now(),
+                                };
+                                messages.push(toolResultMsg);
+                                trajectory.push(toolResultMsg);
+                            }
+                            continue;
+                        }
+
+                        const summary = response.content
+                            .filter((content): content is any => content.type === "text")
+                            .map((content) => content.text)
+                            .join("\n")
+                            .trim();
+
+                        trajectory.push({
+                            role: "assistant",
+                            content: response.content,
                             timestamp: Date.now(),
-                        };
-                        messages.push(toolResultMsg);
-                        trajectory.push(toolResultMsg);
+                        } as AssistantMessage);
+
+                        if (summary.length < MIN_SUMMARY_CHARS) {
+                            throw new Error(`Summary too short: ${summary.length} characters`);
+                        }
+
+                        if (signal.aborted) {
+                            throw new Error("Compaction cancelled");
+                        }
+
+                        saveCompactionDebug(sessionId, {
+                            input: llmMessages,
+                            customInstructions: event.customInstructions,
+                            extractedUserCompactionNote: userCompactionNote,
+                            trajectory,
+                            model: fullModelId(model),
+                            output: { summary, firstKeptEntryId, tokensBefore },
+                        });
+
+                        return { summary, firstKeptEntryId, tokensBefore };
                     }
-                    continue;
-                }
-
-                // Done - extract summary
-                const summary = response.content
-                    .filter((c): c is any => c.type === "text")
-                    .map((c) => c.text)
-                    .join("\n")
-                    .trim();
-
-                trajectory.push({
-                    role: "assistant",
-                    content: response.content,
-                    timestamp: Date.now(),
-                } as AssistantMessage);
-
-                if (summary.length < MIN_SUMMARY_CHARS) {
-                    debugLog(`Summary too short: ${summary.length} chars`);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : String(error);
                     saveCompactionDebug(sessionId, {
                         input: llmMessages,
                         customInstructions: event.customInstructions,
                         extractedUserCompactionNote: userCompactionNote,
                         trajectory,
-                        error: "Summary too short",
+                        model: fullModelId(model),
+                        error: message,
                     });
-                    return;
+                    throw error;
                 }
+            },
+            (failure, hasNext) => {
+                debugLog(`Compaction with ${failure.modelId} failed: ${failure.error}`);
+                ctx.ui.notify(
+                    `Compaction with ${failure.modelId} failed: ${failure.error}${hasNext ? "; trying next model" : ""}`,
+                    "warning",
+                );
+            },
+        );
 
-                if (signal.aborted) return;
-
-                saveCompactionDebug(sessionId, {
-                    input: llmMessages,
-                    customInstructions: event.customInstructions,
-                    extractedUserCompactionNote: userCompactionNote,
-                    trajectory,
-                    output: { summary, firstKeptEntryId, tokensBefore },
-                });
-
-                return {
-                    compaction: { summary, firstKeptEntryId, tokensBefore },
-                };
-            }
-        } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            debugLog(`Compaction failed: ${message}`);
-            saveCompactionDebug(sessionId, {
-                input: llmMessages,
-                customInstructions: event.customInstructions,
-                extractedUserCompactionNote: userCompactionNote,
-                trajectory,
-                error: message,
-            });
-            if (!signal.aborted) {
-                ctx.ui.notify(`Compaction failed: ${message}`, "warning");
-            }
-            return;
+        if (compactionAttempt.result) {
+            return { compaction: compactionAttempt.result };
         }
+
+        if (compactionAttempt.aborted || signal.aborted) {
+            return { cancel: true };
+        }
+
+        const attemptedModels = compactionAttempt.failures.map((failure) => failure.modelId).join(", ");
+        ctx.ui.notify(
+            `Agentic compaction failed for all configured models (${attemptedModels}). Built-in fallback was skipped to avoid repeating the failed request.`,
+            "error",
+        );
+        return { cancel: true };
     });
 }
