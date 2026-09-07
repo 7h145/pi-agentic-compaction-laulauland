@@ -35,3 +35,13 @@ test("usage adds cache tokens and costs without mutating response usage", () => 
     assert.equal(total.cost.total, 1);
     assert.equal(response.totalTokens, 100);
 });
+
+test("retained branch-summary metadata is not folded into the discarded span", () => {
+    const event: any = { preparation: { firstKeptEntryId: "kept" }, branchEntries: [
+        { type: "message", id: "old-kept" },
+        { type: "compaction", firstKeptEntryId: "old-kept", details: { modifiedFiles: ["old.ts"] } },
+        { type: "branch_summary", id: "discarded", details: { modifiedFiles: ["discarded.ts"] } },
+        { type: "branch_summary", id: "kept", details: { modifiedFiles: ["retained.ts"] } },
+    ] };
+    assert.deepEqual(cumulativeFileOps(event, { readFiles: [], modifiedFiles: [] }).modifiedFiles, ["discarded.ts", "old.ts"]);
+});
