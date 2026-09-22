@@ -6,8 +6,8 @@
  * explore it with jq, grep, etc. without writing to disk.
  */
 
-import { type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model, type Usage } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
+import { type Message, type AssistantMessage, type ToolResultMessage, type Tool, type Model, type Usage, type ModelThinkingLevel, type SimpleStreamOptions, clampThinkingLevel } from "@earendil-works/pi-ai";
+import { complete, completeSimple } from "@earendil-works/pi-ai/compat";
 import { convertToLlm, estimateTokens, DynamicBorder, getAgentDir, SettingsManager, type ExtensionAPI, type ExtensionContext, type SessionBeforeCompactEvent } from "@earendil-works/pi-coding-agent";
 import { Container, type Focusable, fuzzyFilter, getKeybindings, Input, Key, matchesKey, Spacer, Text, type TUI } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -31,7 +31,7 @@ const COMPACTION_MODELS = [
 
 const CONFIG_FILENAME = "pi-agentic-compaction.json";
 const PROJECT_CONFIG_DIR = ".pi";
-const THINKING_LEVEL_SUFFIXES = new Set(["off", "minimal", "low", "medium", "high", "xhigh"]);
+const THINKING_LEVEL_SUFFIXES = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
 
 // Debug mode - saves compaction data to ~/.pi/agent/compactions/
 const DEBUG_COMPACTIONS = false;
@@ -51,8 +51,14 @@ type ConfigScope = "global" | "project";
 type ConfigSource = "default" | ConfigScope;
 type PickerScope = "all" | "scoped";
 
+export type CompactionModelEntry = string | { model: string; thinking?: ModelThinkingLevel };
+
+function modelEntryId(entry: CompactionModelEntry): string {
+    return typeof entry === "string" ? entry : entry.model;
+}
+
 type PersistedCompactionConfig = {
-    models?: string[];
+    models?: CompactionModelEntry[];
 };
 
 type ReadJsonResult = {
@@ -62,7 +68,7 @@ type ReadJsonResult = {
 };
 
 type LoadedCompactionConfig = {
-    models: string[];
+    models: CompactionModelEntry[];
     source: ConfigSource;
     globalRead: ReadJsonResult;
     projectRead: ReadJsonResult;
@@ -89,6 +95,7 @@ type PickerItem = {
 
 export type ResolvedCompactionModel = {
     model: Model<any>;
+    thinking?: ModelThinkingLevel;
 };
 
 export type CompactionAttemptFailure = {
@@ -400,11 +407,26 @@ function readJsonObjectFile(filePath: string): ReadJsonResult {
 }
 
 function extractPersistedCompactionConfig(data: JsonObject): PersistedCompactionConfig {
-    const object = data;
-    const models = Array.isArray(object.models)
-        ? normalizeModelIds(object.models.filter((value): value is string => typeof value === "string"))
-        : undefined;
-
+    if (data.models === undefined) return {};
+    if (!Array.isArray(data.models)) throw new Error("Compaction models must be an array");
+    const models: CompactionModelEntry[] = [];
+    const seen = new Set<string>();
+    for (const entry of data.models) {
+        const object = entry && typeof entry === "object" && !Array.isArray(entry) ? entry : undefined;
+        const id = typeof entry === "string" ? entry.trim() : typeof object?.model === "string" ? object.model.trim() : "";
+        if (!parseFullModelId(id)) throw new Error("Compaction model must be a provider/model string or an object with a provider/model in 'model'");
+        if (object) {
+            for (const key of Object.keys(object)) {
+                if (key !== "model" && key !== "thinking") throw new Error(`Unknown compaction model option: ${key}`);
+            }
+            if (object.thinking !== undefined && !THINKING_LEVEL_SUFFIXES.has(object.thinking)) {
+                throw new Error(`Invalid compaction thinking level for ${id}: ${String(object.thinking)}`);
+            }
+        }
+        if (seen.has(id)) continue;
+        seen.add(id);
+        models.push(object ? { model: id, ...(object.thinking !== undefined ? { thinking: object.thinking } : {}) } : id);
+    }
     return { models };
 }
 
@@ -413,8 +435,13 @@ export function loadCompactionModelConfig(cwd: string): LoadedCompactionConfig {
     const globalRead = readJsonObjectFile(paths.global);
     const projectRead = readJsonObjectFile(paths.project);
 
-    const globalConfig = globalRead.error ? {} : extractPersistedCompactionConfig(globalRead.data);
-    const projectConfig = projectRead.error ? {} : extractPersistedCompactionConfig(projectRead.data);
+    const parseConfig = (read: ReadJsonResult, file: string): PersistedCompactionConfig => {
+        if (read.error) return {};
+        try { return extractPersistedCompactionConfig(read.data); }
+        catch (error) { read.error = `${file}: ${String(error)}`; return {}; }
+    };
+    const globalConfig = parseConfig(globalRead, paths.global);
+    const projectConfig = parseConfig(projectRead, paths.project);
 
     if (projectConfig.models !== undefined) {
         return {
@@ -466,7 +493,11 @@ export function persistCompactionModelConfig(cwd: string, scope: ConfigScope, mo
     }
 
     const root: JsonObject = { ...current.data };
-    root.models = normalizeModelIds(models);
+    // Preserve target-scope options first, then inherited options for a new selection.
+    const config = loadCompactionModelConfig(cwd);
+    const currentEntries = extractPersistedCompactionConfig(current.data).models ?? [];
+    const entries = new Map([...config.models, ...currentEntries].map(entry => [modelEntryId(entry), entry]));
+    root.models = normalizeModelIds(models).map(id => entries.get(id) ?? id);
 
     writeJsonObjectFileAtomic(filePath, root);
     return filePath;
@@ -850,6 +881,21 @@ export async function completeCompactionTurn(
     options: CompletionOptions,
     legacyComplete: typeof complete = complete,
 ): Promise<AssistantMessage> {
+    if (candidate.thinking !== undefined) {
+        const effective = clampThinkingLevel(candidate.model, candidate.thinking);
+        const simpleOptions: SimpleStreamOptions = {
+            ...options,
+            reasoning: effective === "off" ? undefined : effective,
+        };
+        const registry = ctx.modelRegistry as unknown as { completeSimple?: typeof completeSimple };
+        if (typeof registry.completeSimple === "function") {
+            return registry.completeSimple.call(ctx.modelRegistry, candidate.model, context, simpleOptions);
+        }
+        const auth = await ctx.modelRegistry.getApiKeyAndHeaders(candidate.model);
+        if (options.signal?.aborted) throw new Error("Compaction cancelled");
+        if (auth.ok === false) throw new Error(`Could not resolve request auth for ${fullModelId(candidate.model)}: ${auth.error}`);
+        return completeSimple(candidate.model, context, { ...simpleOptions, apiKey: auth.apiKey, headers: auth.headers });
+    }
     const registryComplete = (ctx.modelRegistry as unknown as ModelRegistryWithComplete).complete;
     if (typeof registryComplete === "function") {
         return registryComplete.call(ctx.modelRegistry, candidate.model, context, options);
@@ -875,14 +921,14 @@ export async function resolveCompactionModels(
     signal: AbortSignal,
 ): Promise<CompactionModelResolution> {
     const config = loadCompactionModelConfig(ctx.cwd);
-    const configuredIds = config.models;
+    const configuredIds = config.models.map(modelEntryId);
     const candidates: ResolvedCompactionModel[] = [];
     const seen = new Set<string>();
 
     debugLog(`Compaction model config source: ${config.source}`);
     debugLog(`Compaction model candidates: ${configuredIds.join(", ") || "(none)"}`);
 
-    const addCandidate = (model: Model<any>, configuredId: string): void => {
+    const addCandidate = (model: Model<any>, configuredId: string, thinking?: ModelThinkingLevel): void => {
         if (signal.aborted) return;
 
         const modelId = fullModelId(model);
@@ -893,10 +939,11 @@ export async function resolveCompactionModels(
         }
 
         seen.add(modelId);
-        candidates.push({ model });
+        candidates.push({ model, ...(thinking !== undefined ? { thinking } : {}) });
     };
 
-    for (const candidateId of configuredIds) {
+    for (const entry of config.models) {
+        const candidateId = modelEntryId(entry);
         if (signal.aborted) break;
         const parsed = parseFullModelId(candidateId);
         if (!parsed) {
@@ -910,7 +957,7 @@ export async function resolveCompactionModels(
             continue;
         }
 
-        addCandidate(registryModel, candidateId);
+        addCandidate(registryModel, candidateId, typeof entry === "string" ? undefined : entry.thinking);
     }
 
     if (!signal.aborted && ctx.model) {
@@ -1097,7 +1144,7 @@ export default function (pi: ExtensionAPI) {
                 return new CompactionModelSelectorComponent(tui, theme, {
                     allModels: availableModels,
                     scopedModels,
-                    initialSelectedIds: config.models,
+                    initialSelectedIds: config.models.map(modelEntryId),
                     initialScope,
                     saveScope,
                     done,
@@ -1317,7 +1364,9 @@ What remains to be done`;
                     ];
                     const trajectory: Message[] = [...messages];
 
-                    ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}`, "info");
+                    const effectiveThinking = candidate.thinking === undefined ? undefined : clampThinkingLevel(model, candidate.thinking);
+                    const thinkingStatus = effectiveThinking === undefined ? "" : ` (thinking: ${effectiveThinking}${effectiveThinking !== candidate.thinking ? `; requested: ${candidate.thinking}` : ""})`;
+                    ctx.ui.notify(`Compacting ${allMessages.length} messages with ${fullModelId(model)}${thinkingStatus}`, "info");
 
                     let turns = 0;
                     try {
