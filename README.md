@@ -110,6 +110,44 @@ Project `models` replace the global list; project `limits` override global limit
 
 At runtime, the extension tries the persisted models in order and skips any that are unavailable, unauthenticated, or no longer registered. The session model is the final candidate when it is not already selected. If a request throws, returns an `error`/`aborted` response, or produces an invalid summary, the extension starts a fresh attempt with the next model. If every candidate fails, it cancels compaction after reporting the failures instead of silently repeating the failed request through Pi's built-in compactor.
 
+### Compaction thinking
+
+Model entries can be strings or objects with a thinking level:
+
+```json
+{
+  "models": [
+    {
+      "model": "openai.lcl.offis.de/deepseek-ai/DeepSeek-V4-Flash-0731",
+      "thinking": "low"
+    },
+    "openai-codex/gpt-5.6-luna"
+  ]
+}
+```
+
+Set `thinking` to `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`.
+Pi's resolved model definition supplies reasoning support, `thinkingLevelMap`,
+and provider compatibility settings. Keep those in Pi's `models.json`; the
+extension only selects a level. Pi clamps unsupported levels to a supported
+level. The compaction notification shows the effective level and, if different,
+the requested level.
+
+The setting applies to every turn for that candidate. Failover uses the next
+candidate's own setting. A string entry or omitted `thinking` preserves the
+previous completion behavior; it does not inherit the session's thinking level.
+The automatically appended session-model fallback also has no explicit thinking
+setting unless that model is already in the configured list.
+
+Project model lists still replace global lists. `/compaction-model` selects and
+orders models; edit the JSON to select thinking. Saving from the picker preserves
+options for retained models, preferring existing options in the save target and
+otherwise inheriting them from the effective list.
+
+Thinking consumes the model's output allowance too. If reasoning leaves too
+little room for an answer, increase `limits.maxOutputTokens` (default 4096).
+The existing context, token, and elapsed-time limits still apply.
+
 ### Steerable compaction
 
 Because the summarizer runs as a separate model in its own agentic loop, its behavior is directly steerable. You can pass guidance via `/compact` notes:

@@ -65,3 +65,29 @@ test("malformed config is reported and never overwritten by picker persistence",
     assert.throws(() => persistCompactionModelConfig(cwd, "project", ["test/a"]), /Failed to parse/);
     assert.equal(fs.readFileSync(project, "utf8"), "{broken");
 }));
+
+test("mixed model entries inherit and picker saves preserve thinking in the selected scope", () => fixture((cwd, global, project) => {
+    const deepseek = { model: "local/deepseek", thinking: "low" };
+    write(global, { models: [deepseek, "test/fallback"] });
+    write(project, { limits: { maxTurns: 32 } });
+    assert.deepEqual(loadCompactionModelConfig(cwd).models, [deepseek, "test/fallback"]);
+    persistCompactionModelConfig(cwd, "project", ["test/fallback", "local/deepseek"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(project, "utf8")), {
+        models: ["test/fallback", deepseek], limits: { maxTurns: 32 },
+    });
+    write(global, { models: [{ ...deepseek, thinking: "high" }] });
+    persistCompactionModelConfig(cwd, "global", ["local/deepseek"]);
+    assert.deepEqual(JSON.parse(fs.readFileSync(global, "utf8")).models, [{ ...deepseek, thinking: "high" }]);
+    write(project, { models: [] });
+    assert.deepEqual(loadCompactionModelConfig(cwd).models, []);
+}));
+
+test("invalid model options are reported and never overwritten", () => fixture((cwd, _global, project) => {
+    for (const models of ["bad", [null], [{ model: "test/a", thinking: "lo" }], [{ model: "test/a", thinking: null }], [{ model: "test/a", thinkng: "low" }]]) {
+        write(project, { models });
+        const before = fs.readFileSync(project, "utf8");
+        assert.throws(() => loadCompactionLimits(cwd), /Compaction|compaction/);
+        assert.throws(() => persistCompactionModelConfig(cwd, "project", ["test/a"]));
+        assert.equal(fs.readFileSync(project, "utf8"), before);
+    }
+}));

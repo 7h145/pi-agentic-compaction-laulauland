@@ -80,6 +80,46 @@ For example, the standalone file can contain:
 Use a real registered provider/model ID, or save via the picker. No configuration
 on your own machine has been migrated remotely.
 
+## Selecting thinking for compaction
+
+In the standalone config, replace a model string with an object to select its
+thinking level. For the on-prem DeepSeek setup:
+
+```json
+{
+  "models": [
+    {
+      "model": "openai.lcl.offis.de/deepseek-ai/DeepSeek-V4-Flash-0731",
+      "thinking": "low"
+    },
+    "openai-codex/gpt-5.6-luna"
+  ],
+  "limits": {
+    "maxTurns": 32,
+    "maxTotalTokens": 10000000,
+    "maxContextTokens": 72000,
+    "maxToolCallsPerTurn": 16
+  }
+}
+```
+
+Keep `reasoning`, `thinkingLevelMap`, and `compat` in Pi's existing `models.json`.
+The extension reuses the resolved model and Pi's mapping. Supported config values
+are `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. Unsupported levels
+are clamped by Pi; the notification reports the effective and requested levels
+when they differ. String entries keep their previous behavior, independent of
+session thinking. `/compaction-model` preserves options when saving retained models.
+
+After updating the package and running `/reload`, trigger `/compact` and look for
+`(thinking: low)` next to the DeepSeek model name. The level applies to every
+exploration turn as well as the final summary. If it fails over, the next model
+uses its own setting. The session model remains a final fallback unless already
+listed; it has no explicit compaction thinking level when appended automatically.
+
+These limits are the successful large-session dogfood profile, not new defaults.
+Thinking shares the output allowance with the answer. If summaries are truncated
+after enabling it, consider raising `maxOutputTokens` from its default of 4096.
+
 ## Limits
 
 Optional standalone global or project config (project limit keys override global keys):
